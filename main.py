@@ -60,7 +60,7 @@ def home():
 @app.route("/health")
 def health():
     return jsonify(status="ok", container=socket.gethostname(), visits=visits)
-
+print ("hello from diya")
 
 if __name__ == "__main__":
     # 0.0.0.0 matters: inside a container, 127.0.0.1 is only reachable
