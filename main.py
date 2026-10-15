@@ -11,7 +11,15 @@ import socket
 import sys
 from datetime import datetime
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+
+from db import (
+    record_visit, get_visit_count,
+    create_note, get_notes, update_note, delete_note
+)
+
+
+from cache import get_cached_visits, set_cached_visits, clear_cached_visits
 
 app = Flask(__name__)
 
@@ -44,22 +52,39 @@ PAGE = """<!doctype html>
 </div></body></html>"""
 
 
+
 @app.route("/")
 def home():
-    global visits
-    visits += 1
+    record_visit()
+    clear_cached_visits()
+
+    total_visits = get_cached_visits()
+
+    if total_visits is None:
+        total_visits = get_visit_count()
+        set_cached_visits(total_visits)
+
     return PAGE.format(
         greeting=os.environ.get("GREETING", "Hello from Docker"),
         host=socket.gethostname(),
         py=sys.version.split()[0],
         started=started,
-        visits=visits,
+        visits=total_visits,
     )
 
 
+
+
+@app.route("/health")
+
 @app.route("/health")
 def health():
-    return jsonify(status="ok", container=socket.gethostname(), visits=visits)
+    return jsonify(
+        status="ok",
+        container=socket.gethostname(),
+        visits=get_visit_count()
+    )
+
 
 @app.route("/api/info")
 def app_info():
@@ -69,6 +94,48 @@ def app_info():
         container_id=socket.gethostname(),
         status="running"
     )
+
+
+@app.route("/api/notes", methods=["POST"])
+def add_note():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("title"), str) or not data["title"].strip():
+        return jsonify(error="Title is required"), 400
+
+    content = data.get("content", "")
+    if not isinstance(content, str):
+        return jsonify(error="Content must be a string"), 400
+
+    note_id = create_note(data["title"], content)
+    return jsonify(id=note_id, message="Note created"), 201
+
+
+@app.route("/api/notes", methods=["GET"])
+def list_notes():
+    return jsonify(get_notes())
+
+
+@app.route("/api/notes/<int:note_id>", methods=["PUT"])
+def edit_note(note_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("title"), str) or not data["title"].strip():
+        return jsonify(error="Title is required"), 400
+
+    content = data.get("content", "")
+    if not isinstance(content, str):
+        return jsonify(error="Content must be a string"), 400
+
+    if update_note(note_id, data["title"], content):
+        return jsonify(message="Note updated")
+    return jsonify(error="Note not found"), 404
+
+
+@app.route("/api/notes/<int:note_id>", methods=["DELETE"])
+def remove_note(note_id):
+    if delete_note(note_id):
+        return jsonify(message="Note deleted")
+    return jsonify(error="Note not found"), 404
+
 
 
 if __name__ == "__main__":
