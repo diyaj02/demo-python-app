@@ -61,6 +61,15 @@ def home():
 def health():
     return jsonify(status="ok", container=socket.gethostname(), visits=visits)
 
+@app.route("/api/info")
+def app_info():
+    return jsonify(
+        app_name="Docker Demo App",
+        python_version=sys.version.split()[0],
+        container_id=socket.gethostname(),
+        status="running"
+    )
+
 
 if __name__ == "__main__":
     # 0.0.0.0 matters: inside a container, 127.0.0.1 is only reachable
