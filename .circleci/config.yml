@@ -1,0 +1,177 @@
+
+version: 2.1
+
+jobs:
+  secret_scan:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Scan for secrets with Gitleaks
+          command: |
+            curl -fsSL \
+              https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz \
+              -o /tmp/gitleaks.tar.gz
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+            /tmp/gitleaks git . --redact --exit-code 1
+
+  lint:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install development dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Run Ruff linting
+          command: python -m ruff check .
+
+  unit_tests:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Run unit tests
+          command: python -m pytest tests/test_main.py -v
+
+  integration_tests:
+    docker:
+      - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://demo:demo_test_password@localhost:5432/demoapp
+          REDIS_URL: redis://localhost:6379/0
+      - image: postgres:16-alpine
+        environment:
+          POSTGRES_USER: demo
+          POSTGRES_PASSWORD: demo_test_password
+          POSTGRES_DB: demoapp
+      - image: redis:7-alpine
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+      
+      - run:
+          name: Wait for PostgreSQL and Redis
+          command: |
+            python -c '
+            import os
+            import time
+            import psycopg
+            import redis
+
+            for attempt in range(30):
+                try:
+                    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+                        conn.execute("SELECT 1")
+                    redis.Redis.from_url(os.environ["REDIS_URL"]).ping()
+                    print("PostgreSQL and Redis are ready")
+                    break
+                except (psycopg.OperationalError, redis.RedisError):
+                    time.sleep(2)
+            else:
+                raise RuntimeError("Database or Redis did not become ready")
+            '
+
+      - run:
+          name: Run integration tests
+          command: python -m pytest tests/test_integration.py -v
+
+  publish_image:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and push Docker image
+          command: |
+            set -eu
+
+            case "$CIRCLE_BRANCH" in
+              main) TAG=qa ;;
+              staging) TAG=stage ;;
+              prod) TAG=prod ;;
+              *)
+                echo "Unsupported branch: $CIRCLE_BRANCH"
+                exit 1
+                ;;
+            esac
+
+            SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+            IMAGE="${DOCKERHUB_USER}/demo-python-app"
+
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              -u "$DOCKERHUB_USER" --password-stdin
+
+            docker build \
+              -t "${IMAGE}:${TAG}" \
+              -t "${IMAGE}:${TAG}-${SHORT_SHA}" \
+              .
+
+            docker push "${IMAGE}:${TAG}"
+            docker push "${IMAGE}:${TAG}-${SHORT_SHA}"
+
+workflows:
+  qa_pipeline:
+    jobs:
+      - secret_scan:
+          filters:
+            branches:
+              only:
+                - main
+                - /^feature\/.*/
+      - lint:
+          requires:
+            - secret_scan
+          filters:
+            branches:
+              only:
+                - main
+                - /^feature\/.*/
+      - unit_tests:
+          requires:
+            - lint
+          filters:
+            branches:
+              only:
+                - main
+                - /^feature\/.*/
+      - integration_tests:
+          requires:
+            - unit_tests
+          filters:
+            branches:
+              only:
+                - main
+                - /^feature\/.*/
+      - publish_image:
+          name: publish_qa
+          requires:
+            - integration_tests
+          filters:
+            branches:
+              only: main
+
+  staging_pipeline:
+    jobs:
+      - publish_image:
+          name: publish_stage
+          filters:
+            branches:
+              only: staging
+
+  production_pipeline:
+    jobs:
+      - publish_image:
+          name: publish_prod
+          filters:
+            branches:
+              only: prod
